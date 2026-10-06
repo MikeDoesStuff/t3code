@@ -1,6 +1,11 @@
 name: Nightly Android APK
 
-# Builds upstream nightly source in the personal EAS project.
+# Builds T3 Code Mobile ("T3 Code Preview", package com.t3tools.t3code.preview)
+# into a self-contained, sideloadable APK — entirely in the cloud, no Android
+# SDK/Studio needed locally. Installs side-by-side with the Play Store app.
+#
+# The workflow lives on the fork but checks out pingdotgg/t3code directly, so it
+# always builds upstream's code (default: the latest nightly tag).
 on:
   workflow_dispatch:
     inputs:
@@ -9,63 +14,53 @@ on:
         required: false
         type: string
   schedule:
-    - cron: "15 4 * * *"
+    - cron: "15 4 * * *" # nightly 04:15 UTC
 
 permissions:
   contents: read
 
-concurrency:
-  group: nightly-apk-eas
-  cancel-in-progress: false
-
 jobs:
   apk:
     runs-on: ubuntu-24.04
-    environment: production
-    timeout-minutes: 180
+    timeout-minutes: 120
     env:
       APP_VARIANT: preview
       MOBILE_VERSION_POLICY: appVersion
+      # Keep the installed app on the nightly source that this job builds.
       T3CODE_MOBILE_UPDATES_ENABLED: "0"
       NODE_OPTIONS: --max-old-space-size=4096
     steps:
-      - name: Check Expo authentication is configured
-        env:
-          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
-        run: |
-          [ -n "$EXPO_TOKEN" ] || { echo "::error::Set EXPO_TOKEN in the production environment"; exit 1; }
-
       - name: Resolve build ref
         id: resolve
+        shell: bash
         run: |
           if [ -n "${REF:-}" ]; then
             ref="$REF"
           else
             ref="$(git ls-remote --tags --refs https://github.com/pingdotgg/t3code.git 'v*nightly*' | awk -F/ '{print $3}' | sort -V | tail -n1)"
           fi
-          [ -n "$ref" ] || { echo "::error::Could not resolve a build ref"; exit 1; }
+          [ -n "$ref" ] || { echo "::error::could not resolve a build ref" >&2; exit 1; }
           echo "Building from ref: $ref"
           echo "ref=$ref" >> "$GITHUB_OUTPUT"
         env:
           REF: ${{ inputs.ref }}
 
-      - name: Checkout personal build setup
-        uses: actions/checkout@v6
-        with:
-          sparse-checkout: .github/scripts
-
-      - name: Preserve personal build setup
-        run: cp .github/scripts/prepare-eas-nightly.mjs "$RUNNER_TEMP/prepare-eas-nightly.mjs"
-
       - name: Checkout upstream
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
         with:
           repository: pingdotgg/t3code
           ref: ${{ steps.resolve.outputs.ref }}
-          # EAS archives with a local git clone; partial clones can fail on missing blobs.
-          fetch-depth: 1
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
 
-      - name: Setup Vite+ and cache mobile dependencies
+      # T3 Connect (Clerk + relay) is disabled in a fresh clone; the committed
+      # public config enables it against the production deployment.
+      - name: Enable T3 Connect (production public config)
+        run: cp .env.example .env
+
+      - name: Setup Vite+
         uses: voidzero-dev/setup-vp@v1
         with:
           node-version-file: package.json
@@ -74,59 +69,72 @@ jobs:
             args:
               - --filter=@t3tools/mobile...
 
-      - name: Expose matching pnpm
-        run: |
-          pnpm_version="$(node --print "require('./package.json').packageManager.split('@').pop()")"
-          vp_pnpm_bin="$HOME/.vite-plus/package_manager/pnpm/$pnpm_version/pnpm/bin"
-          echo "$vp_pnpm_bin" >> "$GITHUB_PATH"
-          "$vp_pnpm_bin/pnpm" --version
-
-      - name: Configure personal EAS nightly APK
-        run: node "$RUNNER_TEMP/prepare-eas-nightly.mjs"
-
-      - name: Verify resolved standalone app identity
-        working-directory: apps/mobile
-        run: |
-          npx expo config --json | node -e '
-            const c = JSON.parse(require("fs").readFileSync(0, "utf8"));
-            if (c.android?.package !== "com.t3tools.t3code.preview" ||
-                c.owner !== "miccul" ||
-                c.extra?.eas?.projectId !== "7692959f-2dcf-43b1-9acd-33771a371a21" ||
-                c.updates?.enabled !== false) {
-              throw new Error("Resolved Expo config does not match the standalone nightly app");
-            }
-            console.log("Preview package, personal EAS project and disabled OTA verified");
-          '
-
-      - name: Setup EAS
-        uses: expo/expo-github-action@v8
+      - name: Setup JDK 17
+        uses: actions/setup-java@v5
         with:
-          eas-version: latest
-          token: ${{ secrets.EXPO_TOKEN }}
-          packager: npm
+          distribution: temurin
+          java-version: 17
 
-      - name: Build standalone APK in EAS
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          # The action's default (`tools platform-tools`) fails: the legacy
+          # `tools` package no longer exists in Google's SDK repository.
+          # Install platform-tools only; Gradle fetches the exact platform,
+          # build-tools and NDK the generated project requires.
+          packages: platform-tools
+
+      - name: Prebuild Android (preview variant)
         working-directory: apps/mobile
         env:
-          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
-          BUILD_REF: ${{ steps.resolve.outputs.ref }}
-        run: |
-          eas build --platform android --profile nightly --non-interactive --wait --json --message "$BUILD_REF" > "$RUNNER_TEMP/eas-build.json"
+          # The copied .env leaves the repo "dirty"; prebuild's git-clean
+          # check would block in non-interactive CI (same reason their own
+          # scripts set EXPO_NO_GIT_STATUS=1).
+          EXPO_NO_GIT_STATUS: 1
+        run: npx expo prebuild --platform android --no-install
 
-      - name: Download completed APK
+      - name: Cache Gradle dependencies and build outputs
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-read-only: false
+
+      - name: Ensure release signs with debug keystore
+        working-directory: apps/mobile/android
         run: |
-          url="$(jq -er '.[0].artifacts.buildUrl' "$RUNNER_TEMP/eas-build.json")"
-          build_id="$(jq -er '.[0].id' "$RUNNER_TEMP/eas-build.json")"
-          mkdir -p dist-apk
-          curl --fail --location --retry 3 "$url" --output dist-apk/t3code-preview-nightly.apk
-          unzip -t dist-apk/t3code-preview-nightly.apk > /dev/null
-          echo "### Nightly APK" >> "$GITHUB_STEP_SUMMARY"
-          echo "EAS build: https://expo.dev/accounts/miccul/projects/t3code-nightly/builds/$build_id" >> "$GITHUB_STEP_SUMMARY"
-          sha256sum dist-apk/t3code-preview-nightly.apk
+          node -e '
+            const fs = require("fs");
+            const p = "app/build.gradle";
+            let g = fs.readFileSync(p, "utf8");
+            if (!/release\s*\{[^}]*signingConfig/s.test(g)) {
+              g = g.replace(/release\s*\{/, "release {\n            signingConfig signingConfigs.debug");
+              fs.writeFileSync(p, g);
+              console.log("patched release buildType with debug signing");
+            } else {
+              console.log("release already has signingConfig");
+            }
+          '
+
+      - name: Build release APK
+        working-directory: apps/mobile/android
+        # Pass CI settings as options: generated gradle.properties may have no
+        # trailing newline, so appending settings can corrupt its final value.
+        run: >-
+          ./gradlew assembleRelease --no-daemon --stacktrace --build-cache
+          --parallel --max-workers=2
+          '-Dorg.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g'
+
+      - name: Locate APK
+        id: apk
+        working-directory: apps/mobile/android
+        run: |
+          apk="$(find app/build/outputs/apk -name '*.apk' | head -n1)"
+          [ -n "$apk" ] || { echo "::error::No APK was produced"; exit 1; }
+          echo "path=apps/mobile/android/$apk" >> "$GITHUB_OUTPUT"
+          ls -lh "$apk"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: t3code-preview-nightly
-          path: dist-apk/t3code-preview-nightly.apk
+          path: ${{ steps.apk.outputs.path }}
           if-no-files-found: error
