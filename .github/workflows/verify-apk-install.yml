@@ -44,7 +44,7 @@ jobs:
           path: |
             ~/.android/avd/*
             ~/.android/adb*
-          key: android-37-x86_64-apk-install-v1
+          key: android-37-x86_64-apk-install-4gb-v2
 
       - name: Verify signature and install on Android 17
         uses: reactivecircus/android-emulator-runner@v2
@@ -53,9 +53,11 @@ jobs:
           target: google_apis
           arch: x86_64
           profile: pixel_7
+          disk-size: 4096M
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           script: |
             "$(find "$ANDROID_HOME/build-tools" -name apksigner | sort -V | tail -n1)" verify --verbose --print-certs apk/app-release.apk
+            adb shell df -h /data
             adb install --no-streaming apk/app-release.apk
             adb shell pm path com.t3tools.t3code.preview
