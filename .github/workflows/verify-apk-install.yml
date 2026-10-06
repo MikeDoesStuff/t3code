@@ -8,6 +8,11 @@ on:
         required: true
         default: "37487163783"
         type: string
+      artifact_name:
+        description: "APK artifact name from that build run"
+        required: true
+        default: "t3code-preview-nightly"
+        type: string
 
 permissions:
   contents: read
@@ -22,9 +27,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           BUILD_RUN: ${{ inputs.run_id }}
+          ARTIFACT_NAME: ${{ inputs.artifact_name }}
         run: |
-          gh run download "$BUILD_RUN" -R "$GITHUB_REPOSITORY" -n t3code-preview-nightly -D apk
-          test -f apk/app-release.apk
+          gh run download "$BUILD_RUN" -R "$GITHUB_REPOSITORY" -n "$ARTIFACT_NAME" -D apk
+          test "$(find apk -maxdepth 1 -name '*.apk' | wc -l)" -eq 1
 
       - name: Setup JDK 17
         uses: actions/setup-java@v5
@@ -44,20 +50,21 @@ jobs:
           path: |
             ~/.android/avd/*
             ~/.android/adb*
-          key: android-37-x86_64-apk-install-4gb-v2
+          key: android-37.2-x86_64-apk-install-4gb-v3
 
       - name: Verify signature and install on Android 17
         uses: reactivecircus/android-emulator-runner@v2
         with:
-          api-level: "37.0"
-          target: google_apis
+          api-level: "37.2"
+          target: google_apis_ps16k
           arch: x86_64
           profile: pixel_7
           disk-size: 4096M
+          ram-size: 4096M
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           script: |
-            "$(find "$ANDROID_HOME/build-tools" -name apksigner | sort -V | tail -n1)" verify --verbose --print-certs apk/app-release.apk
+            "$(find "$ANDROID_HOME/build-tools" -name apksigner | sort -V | tail -n1)" verify --verbose --print-certs apk/*.apk
             adb shell df -h /data
-            adb install --no-streaming apk/app-release.apk
+            bash -c 'adb logcat -c; adb install --no-streaming apk/*.apk; result=$?; if [ "$result" -ne 0 ]; then adb logcat -d -b crash; adb logcat -d -b system | tail -n 100; fi; exit "$result"'
             adb shell pm path com.t3tools.t3code.preview
