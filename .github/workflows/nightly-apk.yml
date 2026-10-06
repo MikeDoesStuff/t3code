@@ -84,6 +84,20 @@ jobs:
       - name: Configure personal EAS nightly APK
         run: node "$RUNNER_TEMP/prepare-eas-nightly.mjs"
 
+      - name: Verify resolved standalone app identity
+        working-directory: apps/mobile
+        run: |
+          npx expo config --json | node -e '
+            const c = JSON.parse(require("fs").readFileSync(0, "utf8"));
+            if (c.android?.package !== "com.t3tools.t3code.preview" ||
+                c.owner !== "miccul" ||
+                c.extra?.eas?.projectId !== "7692959f-2dcf-43b1-9acd-33771a371a21" ||
+                c.updates?.enabled !== false) {
+              throw new Error("Resolved Expo config does not match the standalone nightly app");
+            }
+            console.log("Preview package, personal EAS project and disabled OTA verified");
+          '
+
       - name: Setup EAS
         uses: expo/expo-github-action@v8
         with:

@@ -17,21 +17,24 @@ for (const key of [
   publicEnv[key] = publicExample[key];
 }
 
-// Retain upstream's native plugins/assets while using the personal EAS project.
-fs.renameSync(`${mobile}/app.config.ts`, `${mobile}/app.upstream.config.ts`);
-fs.writeFileSync(`${mobile}/app.config.ts`, `
-import upstream from "./app.upstream.config.ts";
-export default {
-  ...upstream,
+// Keep config evaluation in upstream's file: importing another TS config can
+// introduce a second default-export layer in Expo's config loader.
+const configPath = `${mobile}/app.config.ts`;
+const source = fs.readFileSync(configPath, "utf8");
+const exportLine = "export default config;";
+if (!source.includes(exportLine)) throw new Error("Upstream Expo config export changed");
+fs.writeFileSync(configPath, source.replace(exportLine, `
+Object.assign(config, {
   owner: ${JSON.stringify(owner)},
   slug: ${JSON.stringify(slug)},
-  updates: { ...upstream.updates, enabled: false },
+  updates: { ...config.updates, enabled: false },
   extra: {
-    ...upstream.extra,
-    eas: { ...upstream.extra?.eas, projectId: ${JSON.stringify(projectId)} },
+    ...config.extra,
+    eas: { ...config.extra?.eas, projectId: ${JSON.stringify(projectId)} },
   },
-};
-`);
+});
+export default config;
+`));
 
 const easPath = `${mobile}/eas.json`;
 const eas = JSON.parse(fs.readFileSync(easPath, "utf8"));
