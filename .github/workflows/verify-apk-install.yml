@@ -56,7 +56,6 @@ jobs:
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           script: |
-            signer="$(find "$ANDROID_HOME/build-tools" -name apksigner | sort -V | tail -n1)"
-            "$signer" verify --verbose --print-certs apk/app-release.apk
+            "$(find "$ANDROID_HOME/build-tools" -name apksigner | sort -V | tail -n1)" verify --verbose --print-certs apk/app-release.apk
             adb install --no-streaming apk/app-release.apk
             adb shell pm path com.t3tools.t3code.preview
