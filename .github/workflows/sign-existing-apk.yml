@@ -55,7 +55,9 @@ jobs:
           mkdir -p signed
           "$tools/zipalign" -P 16 -f 4 apk/app-release.apk "$RUNNER_TEMP/aligned.apk"
           "$tools/apksigner" sign --ks "$RUNNER_TEMP/package/android/app/debug.keystore" --ks-key-alias androiddebugkey --ks-pass pass:android --key-pass pass:android --v1-signing-enabled true --v2-signing-enabled true --v3-signing-enabled true --v4-signing-enabled false --out "signed/T3-Code-Preview-$RELEASE_TAG-compatible.apk" "$RUNNER_TEMP/aligned.apk"
-          "$tools/apksigner" verify --verbose --print-certs "signed/T3-Code-Preview-$RELEASE_TAG-compatible.apk" | tee "$RUNNER_TEMP/compatible-cert.txt"
+          # API 21 forces verification of the legacy signature; the APK's own
+          # minimum remains API 24, where Android normally selects v2 instead.
+          "$tools/apksigner" verify --min-sdk-version 21 --verbose --print-certs "signed/T3-Code-Preview-$RELEASE_TAG-compatible.apk" | tee "$RUNNER_TEMP/compatible-cert.txt"
           diff <(grep 'Signer #1 certificate SHA-256 digest:' "$RUNNER_TEMP/original-cert.txt") <(grep 'Signer #1 certificate SHA-256 digest:' "$RUNNER_TEMP/compatible-cert.txt")
           grep -F 'Verified using v1 scheme (JAR signing): true' "$RUNNER_TEMP/compatible-cert.txt"
           grep -F 'Verified using v2 scheme (APK Signature Scheme v2): true' "$RUNNER_TEMP/compatible-cert.txt"
