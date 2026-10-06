@@ -82,7 +82,7 @@ jobs:
           # `tools` package no longer exists in Google's SDK repository.
           # Install platform-tools only; Gradle fetches the exact platform,
           # build-tools and NDK the generated project requires.
-          packages: platform-tools
+          packages: platform-tools build-tools;36.0.0
 
       - name: Prebuild Android (preview variant)
         working-directory: apps/mobile
@@ -101,18 +101,24 @@ jobs:
       - name: Ensure release signs with debug keystore
         working-directory: apps/mobile/android
         run: |
-          node -e '
-            const fs = require("fs");
-            const p = "app/build.gradle";
-            let g = fs.readFileSync(p, "utf8");
-            if (!/release\s*\{[^}]*signingConfig/s.test(g)) {
-              g = g.replace(/release\s*\{/, "release {\n            signingConfig signingConfigs.debug");
-              fs.writeFileSync(p, g);
-              console.log("patched release buildType with debug signing");
-            } else {
-              console.log("release already has signingConfig");
-            }
-          '
+          # Explicitly include JAR certificates for installer/parser compatibility.
+          # Keep Gradle's final settings deterministic without matching comments.
+          cat >> app/build.gradle <<'EOF'
+
+          android {
+              signingConfigs {
+                  debug {
+                      enableV1Signing = true
+                      enableV2Signing = true
+                  }
+              }
+              buildTypes {
+                  release {
+                      signingConfig signingConfigs.debug
+                  }
+              }
+          }
+          EOF
 
       - name: Build release APK
         working-directory: apps/mobile/android
@@ -131,6 +137,16 @@ jobs:
           [ -n "$apk" ] || { echo "::error::No APK was produced"; exit 1; }
           echo "path=apps/mobile/android/$apk" >> "$GITHUB_OUTPUT"
           ls -lh "$apk"
+
+      - name: Verify APK signing and alignment
+        env:
+          APK_PATH: ${{ steps.apk.outputs.path }}
+        run: |
+          tools="$ANDROID_HOME/build-tools/36.0.0"
+          "$tools/apksigner" verify --verbose --print-certs "$APK_PATH" | tee "$RUNNER_TEMP/apk-signature.txt"
+          grep -F 'Verified using v1 scheme (JAR signing): true' "$RUNNER_TEMP/apk-signature.txt"
+          grep -F 'Verified using v2 scheme (APK Signature Scheme v2): true' "$RUNNER_TEMP/apk-signature.txt"
+          "$tools/zipalign" -c -P 16 4 "$APK_PATH"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
