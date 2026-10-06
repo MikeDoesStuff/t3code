@@ -21,8 +21,14 @@ permissions:
 
 jobs:
   apk:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 120
+    env:
+      APP_VARIANT: preview
+      MOBILE_VERSION_POLICY: appVersion
+      # Keep the installed app on the nightly source that this job builds.
+      T3CODE_MOBILE_UPDATES_ENABLED: "0"
+      NODE_OPTIONS: --max-old-space-size=4096
     steps:
       - name: Resolve build ref
         id: resolve
@@ -81,24 +87,16 @@ jobs:
       - name: Prebuild Android (preview variant)
         working-directory: apps/mobile
         env:
-          APP_VARIANT: preview
-          MOBILE_VERSION_POLICY: appVersion
           # The copied .env leaves the repo "dirty"; prebuild's git-clean
           # check would block in non-interactive CI (same reason their own
           # scripts set EXPO_NO_GIT_STATUS=1).
           EXPO_NO_GIT_STATUS: 1
-          NODE_OPTIONS: --max-old-space-size=4096
         run: npx expo prebuild --platform android --no-install
 
-      - name: Tune Gradle for CI
-        working-directory: apps/mobile/android
-        run: |
-          cat >> gradle.properties <<'EOF'
-          org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g
-          org.gradle.parallel=true
-          org.gradle.caching=true
-          org.gradle.daemon=false
-          EOF
+      - name: Cache Gradle dependencies and build outputs
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-read-only: false
 
       - name: Ensure release signs with debug keystore
         working-directory: apps/mobile/android
@@ -118,14 +116,20 @@ jobs:
 
       - name: Build release APK
         working-directory: apps/mobile/android
-        run: ./gradlew assembleRelease --no-daemon --stacktrace
+        # Pass CI settings as options: generated gradle.properties may have no
+        # trailing newline, so appending settings can corrupt its final value.
+        run: >-
+          ./gradlew assembleRelease --no-daemon --stacktrace --build-cache
+          --parallel --max-workers=2
+          '-Dorg.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g'
 
       - name: Locate APK
         id: apk
         working-directory: apps/mobile/android
         run: |
           apk="$(find app/build/outputs/apk -name '*.apk' | head -n1)"
-          echo "path=$apk" >> "$GITHUB_OUTPUT"
+          [ -n "$apk" ] || { echo "::error::No APK was produced"; exit 1; }
+          echo "path=apps/mobile/android/$apk" >> "$GITHUB_OUTPUT"
           ls -lh "$apk"
 
       - name: Upload APK
