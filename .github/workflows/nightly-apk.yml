@@ -1,0 +1,126 @@
+name: Nightly Android APK
+
+# Builds T3 Code Mobile ("T3 Code Preview", package com.t3tools.t3code.preview)
+# into a self-contained, sideloadable APK — entirely in the cloud, no Android
+# SDK/Studio needed locally. Installs side-by-side with the Play Store app.
+#
+# The workflow lives on the fork but checks out pingdotgg/t3code directly, so it
+# always builds upstream's code (default: the latest nightly tag).
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git tag/branch to build (blank = latest nightly tag)"
+        required: false
+        type: string
+  schedule:
+    - cron: "15 4 * * *" # nightly 04:15 UTC
+
+permissions:
+  contents: read
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Resolve build ref
+        id: resolve
+        shell: bash
+        run: |
+          if [ -n "${REF:-}" ]; then
+            ref="$REF"
+          else
+            ref="$(git ls-remote --tags --refs https://github.com/pingdotgg/t3code.git 'v*nightly*' | awk -F/ '{print $3}' | sort -V | tail -n1)"
+          fi
+          [ -n "$ref" ] || { echo "::error::could not resolve a build ref" >&2; exit 1; }
+          echo "Building from ref: $ref"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+        env:
+          REF: ${{ inputs.ref }}
+
+      - name: Checkout upstream
+        uses: actions/checkout@v4
+        with:
+          repository: pingdotgg/t3code
+          ref: ${{ steps.resolve.outputs.ref }}
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+
+      # T3 Connect (Clerk + relay) is disabled in a fresh clone; the committed
+      # public config enables it against the production deployment.
+      - name: Enable T3 Connect (production public config)
+        run: cp .env.example .env
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: |
+            args:
+              - --filter=@t3tools/mobile...
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Prebuild Android (preview variant)
+        working-directory: apps/mobile
+        env:
+          APP_VARIANT: preview
+          MOBILE_VERSION_POLICY: appVersion
+          NODE_OPTIONS: --max-old-space-size=4096
+        run: npx expo prebuild --platform android --no-install
+
+      - name: Tune Gradle for CI
+        working-directory: apps/mobile/android
+        run: |
+          cat >> gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g
+          org.gradle.parallel=true
+          org.gradle.caching=true
+          org.gradle.daemon=false
+          EOF
+
+      - name: Ensure release signs with debug keystore
+        working-directory: apps/mobile/android
+        run: |
+          node -e '
+            const fs = require("fs");
+            const p = "app/build.gradle";
+            let g = fs.readFileSync(p, "utf8");
+            if (!/release\s*\{[^}]*signingConfig/s.test(g)) {
+              g = g.replace(/release\s*\{/, "release {\n            signingConfig signingConfigs.debug");
+              fs.writeFileSync(p, g);
+              console.log("patched release buildType with debug signing");
+            } else {
+              console.log("release already has signingConfig");
+            }
+          '
+
+      - name: Build release APK
+        working-directory: apps/mobile/android
+        run: ./gradlew assembleRelease --no-daemon --stacktrace
+
+      - name: Locate APK
+        id: apk
+        working-directory: apps/mobile/android
+        run: |
+          apk="$(find app/build/outputs/apk -name '*.apk' | head -n1)"
+          echo "path=$apk" >> "$GITHUB_OUTPUT"
+          ls -lh "$apk"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: t3code-preview-nightly
+          path: ${{ steps.apk.outputs.path }}
+          if-no-files-found: error
